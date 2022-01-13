@@ -1,0 +1,449 @@
+library(raster)
+library(sp)
+library(sf)
+library(data.table)
+library(tmap)
+library(rgeos)
+library(spatialEco)
+library(magick)
+library(vcd)
+library(ggplot2)
+library(ggpubr)
+library(PairedData)
+library(dplyr)
+
+# Prepare sighting data and blank mesh of Tokyo 23 wards
+## tokyotanuki <- sighting data file
+## t23_meshcodes <- list of 3次 mesh codes for Tokyo 23 wards
+## MESH05339.shp <- shp file of entire Tokyo map by 3次 mesh
+
+load("tokyotanuki.RData")
+load("t23_meshcodes_full.RData")
+
+tokyotanuki_20082019 <- tokyotanuki[tokyotanuki$t_year %in% c(2008:2019),]
+blankmesh <- shapefile("MESH05339.shp")
+blankmesh <- blankmesh[blankmesh@data$KEY_CODE %in% t23_meshcodes,]
+names(blankmesh)[1] <- "mesh_code"
+
+# Add annual sighting data to blank mesh
+
+for (yr in 2008:2019) {
+    name <- paste0("tanuki_",yr)
+    counts <- c()
+    for (i in t23_meshcodes) {
+        mcc <- sum(tokyotanuki_20082019$mesh_code == i & tokyotanuki_20082019$t_year == yr)
+        counts <- c(counts,mcc)
+    }
+    assign(name,counts)
+}
+yr_df <- data.frame(mesh_code=blankmesh$mesh_code)
+yr_list <- mget(ls(, pattern = "^tanuki_20"))
+for (y in yr_list) {
+    yr_df <- cbind(yr_df,y)
+}
+names(yr_df)[2:13] <- c(names(yr_list))
+mesh_spdf <- merge(blankmesh,yr_df, by="mesh_code")
+rm(name,counts,mcc,y,yr_df,yr_list,yr,i)
+
+# PLOT fig. 1: Sightings by year
+
+filename <- paste0("SightingsByYear.png")
+png(filename, width = 500, height = 500)
+spplot(mesh_spdf[,6:17], names.attr = c(2008:2019), col.regions=c("#f5e6e1","#C2E7FF","#AAD6F3","#92C5E7","#7AB4DB","#4992C3","#3181B7","#1970AB","#005F9E","#00568F"), col="white", cuts=9, colorkey=list(labels=list(at=seq(0, 10, 1))), layout=c(4,3))
+dev.off()
+rm(filename)
+#spplot(mesh_spdf[,6:17], names.attr = c(2008:2019), col.regions=c("#f5e6e1","#eacdc2","#e0b5a4","#d59c85","#cb8367","#c16b49","#a75839","#89482f","#6a3824","#4c281a"), col="white", cuts=9, colorkey=list(labels=list(at=seq(0, 10, 1))), layout=c(4,3))
+
+# Import and prepare land use mosaic maps
+
+landuse_2009 <- shapefile("landuse2009/L03-b-u-09_5339.shp")
+landuse_2009 <- landuse_2009[grep(paste(t23_meshcodes, collapse = "|"), landuse_2009$mesh_code),]
+landuse_2009 <- subset(landuse_2009, landuse != "15") 
+landuse_2009 <- subset(landuse_2009, landuse != "14")
+landuse_2014 <- shapefile("landuse2014/L03-b-u-14_5339.shp")
+landuse_2014 <- landuse_2014[grep(paste(t23_meshcodes, collapse = "|"), landuse_2014$mesh_code),]
+landuse_2014 <- subset(landuse_2014, landuse != "15") 
+landuse_2014 <- subset(landuse_2014, landuse != "14")
+landuse_2016 <- shapefile("landuse2016/L03-b-u-16_5339.shp")
+landuse_2016 <- landuse_2016[grep(paste(t23_meshcodes, collapse = "|"), landuse_2016$mesh_code),]
+landuse_2016 <- subset(landuse_2016, landuse != "15") 
+landuse_2016 <- subset(landuse_2016, landuse != "14")
+landusepalette <- c("#96c896","#64a064","#0a8c14","#f0e682","#e6b43c","#c88c1e","#f0aaa0","#e66e5a","#a03ce6","#d2d2d2","#a0a0a0","#646464","#5abedc")
+landusecats <- c('Agricultural','Forest','Manufactured green','Lowrise','Lowrise (dense)','Highrise (dense)','Large facilities','Industrial','Transportation','Golf','Wasteland','Empty','Water')
+
+# PLOT appendix fig. 1: all 3 land use mosaic maps
+
+tmap_mode("plot")
+tmap_landuse_2009 <- tm_shape(landuse_2009) + tm_fill(col="landuse",breaks=c(1:14),palette=landusepalette,legend.show=FALSE) + tm_layout(frame=FALSE,title="Land use mosaic map 2009")
+tmap_landuse_2014 <- tm_shape(landuse_2014) + tm_fill(col="landuse",breaks=c(1:14),palette=landusepalette,legend.show=FALSE) + tm_layout(frame=FALSE,title="Land use mosaic map 2014")
+tmap_landuse_2016 <- tm_shape(landuse_2016) + tm_fill(col="landuse",breaks=c(1:14),palette=landusepalette,legend.show=FALSE) + tm_layout(frame=FALSE,title="Land use mosaic map 2016")
+tmap_landuse_legend <- tm_shape(landuse_2016) + tm_fill("landuse",title="Land use types",breaks=c(1:14),palette=landusepalette,labels = landusecats) + tm_layout(legend.only = TRUE)
+tmap_arrange(tmap_landuse_2009,tmap_landuse_2014,tmap_landuse_2016,tmap_landuse_legend,nrow=1)
+
+# Get polygons & centroid points of sighting areas by year
+
+for (yr in 2008:2019) {
+    og <- paste0("tanuki_",yr,"_og")
+    tanuki_yr <- paste0("tanuki_",yr)
+    assign(og, mesh_spdf[,c("mesh_code", tanuki_yr)])
+    og_get <- get(og)
+    max_yr <- max(mesh_spdf@data[,tanuki_yr])-1
+    for (n in 0:max_yr) {
+        name <- paste0("tanuki_",yr,"_",n+1)
+        assign(name,og_get[og_get@data[,tanuki_yr]>n, ])
+    }
+    rm(list=ls(pattern="_og"))
+    yrs_dfs <- lapply(ls(pattern=paste0("^tanuki_",yr,"_")), function(x) get(x))
+    assign(tanuki_yr,do.call(rbind,yrs_dfs))
+    pts_yr <- paste0("pts_",yr)
+    tanuki_yr_get <- get(tanuki_yr)
+    assign(pts_yr,SpatialPointsDataFrame(gCentroid(tanuki_yr_get, byid=TRUE), tanuki_yr_get@data, match.ID=FALSE))
+    rm(list=ls(pattern=paste0("^tanuki_",yr,"_")),yrs_dfs,n,name,max_yr,og,og_get,tanuki_yr_get,pts_yr,tanuki_yr,yr)
+}
+
+# Get sightings/no sighting areas by year
+
+## Sightings
+for (yr in 2008:2011) {
+    landuse_tanuki_yr <- paste0("landuse_tanuki_",yr)
+    tanuki_yr <- paste0("tanuki_",yr)
+    tanuki_yr_get <- get(tanuki_yr)
+    assign(landuse_tanuki_yr, landuse_2009[grep(paste(tanuki_yr_get$mesh_code, collapse = "|"), landuse_2009$mesh_code),])
+    rm(landuse_tanuki_yr,tanuki_yr,tanuki_yr_get,yr)
+}
+for (yr in 2012:2015) {
+    landuse_tanuki_yr <- paste0("landuse_tanuki_",yr)
+    tanuki_yr <- paste0("tanuki_",yr)
+    tanuki_yr_get <- get(tanuki_yr)
+    assign(landuse_tanuki_yr, landuse_2014[grep(paste(tanuki_yr_get$mesh_code, collapse = "|"), landuse_2014$mesh_code),])
+    rm(landuse_tanuki_yr,tanuki_yr,tanuki_yr_get,yr)
+}
+for (yr in 2016:2019) {
+    landuse_tanuki_yr <- paste0("landuse_tanuki_",yr)
+    tanuki_yr <- paste0("tanuki_",yr)
+    tanuki_yr_get <- get(tanuki_yr)
+    assign(landuse_tanuki_yr, landuse_2016[grep(paste(tanuki_yr_get$mesh_code, collapse = "|"), landuse_2016$mesh_code),])
+    rm(landuse_tanuki_yr,tanuki_yr,tanuki_yr_get,yr)
+}
+
+## No sightings
+for (yr in 2008:2011) {
+    landuse_notanuki_yr <- paste0("landuse_notanuki_",yr)
+    tanuki_yr <- paste0("tanuki_",yr)
+    tanuki_yr_get <- get(tanuki_yr)
+    assign(landuse_notanuki_yr, landuse_2009[grep(paste(setdiff(t23_meshcodes,as.numeric(unique(tanuki_yr_get$mesh_code))), collapse = "|"), landuse_2009$mesh_code),])
+    rm(landuse_notanuki_yr,tanuki_yr,tanuki_yr_get,yr)
+}
+for (yr in 2012:2015) {
+    landuse_notanuki_yr <- paste0("landuse_notanuki_",yr)
+    tanuki_yr <- paste0("tanuki_",yr)
+    tanuki_yr_get <- get(tanuki_yr)
+    assign(landuse_notanuki_yr, landuse_2014[grep(paste(setdiff(t23_meshcodes,as.numeric(unique(tanuki_yr_get$mesh_code))), collapse = "|"), landuse_2014$mesh_code),])
+    rm(landuse_notanuki_yr,tanuki_yr,tanuki_yr_get,yr)
+}
+for (yr in 2016:2019) {
+    landuse_notanuki_yr <- paste0("landuse_notanuki_",yr)
+    tanuki_yr <- paste0("tanuki_",yr)
+    tanuki_yr_get <- get(tanuki_yr)
+    assign(landuse_notanuki_yr, landuse_2016[grep(paste(setdiff(t23_meshcodes,as.numeric(unique(tanuki_yr_get$mesh_code))), collapse = "|"), landuse_2016$mesh_code),])
+    rm(landuse_notanuki_yr,tanuki_yr,tanuki_yr_get,yr)
+}
+
+# PLOT appendix fig. 2: (A) sightings overlaid against land use map; (B) sighting areas; (C) no sighting areas
+
+## Prep tmaps: repeat the following code for each year with respective landuse map
+tmap_tanuki_2008 <- tm_shape(landuse_2009) + tm_fill(col="landuse",breaks=c(1:14),palette=landusepalette,legend.show=FALSE) + tm_layout(frame=FALSE) + tm_shape(tanuki_2008) + tm_fill(col=tanuki_2008,alpha=0.5,palette=c("#eeeeee","#888888"),legend.show=FALSE)+tm_text(tanuki_2008,size=0.7,col="black") + tm_layout(frame=FALSE)
+tmap_landuse_tanuki_2008 <- tm_shape(landuse_notanuki_2008) + tm_fill(col="white",legend.show=FALSE) + tm_shape(landuse_tanuki_2008) + tm_fill(col="landuse",breaks=c(1:14),palette=landusepalette,legend.show=FALSE) + tm_layout(frame=FALSE)
+tmap_landuse_notanuki_2008 <- tm_shape(landuse_notanuki_2008) + tm_fill(col="landuse",breaks=c(1:14),palette=landusepalette,legend.show=FALSE) + tm_layout(frame=FALSE)
+
+## Plot and save each year's maps
+for(yr in 2008:2019) {
+    tmap_mode("plot")
+    tmap_tanuki_yr <- paste0("tmap_tanuki_",yr)
+    tmap_tanuki_yr_get <- get(tmap_tanuki_yr)
+    tmap_landuse_tanuki_yr <- paste0("tmap_landuse_tanuki_",yr)
+    tmap_landuse_tanuki_yr_get <- get(tmap_landuse_tanuki_yr)
+    tmap_landuse_notanuki_yr <- paste0("tmap_landuse_notanuki_",yr)
+    tmap_landuse_notanuki_yr_get <- get(tmap_landuse_notanuki_yr)
+    tmaps <-tmap_arrange(tmap_tanuki_yr_get,tmap_landuse_tanuki_yr_get,tmap_landuse_notanuki_yr_get,nrow=1)
+    tmaps_png <- paste0("tmaps_",yr,".png")
+    tmap_save(tmaps,filename=tmaps_png) 
+    image_write(image_crop(image_read(tmaps_png),"2100x700+0+700"),tmaps_png)
+}
+imgs <- image_read(list.files(path=".", pattern="tmaps_", all.files=TRUE, full.names=FALSE))
+image_montage(imgs, tile = '1x12', geometry = "x400")
+
+rm(list=ls(pattern=paste0("^tmap_")),imgs)
+
+# Get proportions of each land use type in each t23 land use mosaic map
+
+for (yr in c(2009,2014,2016)) {
+    freq_t23_yr <- paste0("freq_t23_",yr)
+    landuse_yr <- paste0("landuse_",yr)
+    landuse_yr_get <- get(landuse_yr)
+    assign(freq_t23_yr,hist(landuse_yr_get$landuse,breaks=c(0:13),plot=FALSE))
+    freq_t23_yr_get <- get(freq_t23_yr)
+    freq_t23_yr_get$density = freq_t23_yr_get$counts/sum(freq_t23_yr_get$counts)*100
+    assign(freq_t23_yr,freq_t23_yr_get)
+    rm(freq_t23_yr,freq_t23_yr_get,landuse_yr,landuse_yr_get,yr)
+}
+
+# Get proportions of each land use type in each year's land use mosaic map of areas where sightings did/did not occur
+
+for (yr in 2008:2019) {
+    freq_tanuki_yr <- paste0("freq_tanuki_",yr)
+    landuse_tanuki_yr <- paste0("landuse_tanuki_",yr)
+    landuse_tanuki_yr_get <- get(landuse_tanuki_yr)
+    assign(freq_tanuki_yr,hist(landuse_tanuki_yr_get$landuse,breaks=c(0:13),plot=FALSE))
+    freq_tanuki_yr_get <- get(freq_tanuki_yr)
+    freq_tanuki_yr_get$density = freq_tanuki_yr_get$counts/sum(freq_tanuki_yr_get$counts)*100
+    assign(freq_tanuki_yr,freq_tanuki_yr_get)
+    rm(freq_tanuki_yr,freq_tanuki_yr_get,landuse_tanuki_yr,landuse_tanuki_yr_get,yr)
+}
+
+for (yr in 2008:2019) {
+    freq_notanuki_yr <- paste0("freq_notanuki_",yr)
+    landuse_notanuki_yr <- paste0("landuse_notanuki_",yr)
+    landuse_notanuki_yr_get <- get(landuse_notanuki_yr)
+    assign(freq_notanuki_yr,hist(landuse_notanuki_yr_get$landuse,breaks=c(0:13),plot=FALSE))
+    freq_notanuki_yr_get <- get(freq_notanuki_yr)
+    freq_notanuki_yr_get$density = freq_notanuki_yr_get$counts/sum(freq_notanuki_yr_get$counts)*100
+    assign(freq_notanuki_yr,freq_notanuki_yr_get)
+    rm(freq_notanuki_yr,freq_notanuki_yr_get,landuse_notanuki_yr,landuse_notanuki_yr_get,yr)
+}
+
+# PLOT Appendix x: stacked bar charts showing proportion of each land use type in each base land use mosaic map
+
+data<- c(freq_t23_2009$density,freq_t23_2014$density,freq_t23_2016$density)
+rown <- c("2009","2014","2016")
+matrix <- matrix(data, nrow = 3, byrow = TRUE, dimnames = list(rown,landusecats))
+filename <- paste0("LandUseFrequenciesBaseMaps.png")
+png(filename, width = 800, height = 300)
+barplot(t(matrix), main=" ", xaxt="n", ylab="Base map", xlab="Frequency (%)", col=landusepalette, horiz = TRUE)
+axis(1, at = c(0,10,20,30,40,50,60,70,80,90,100))
+dev.off()
+rm(data,rown,matrix,filename)
+
+# PLOT Appendix x: stacked bar charts showing proportion of each land use type in land use mosaic map of areas where sightings did/did not occur between humans and Japanese raccoon dogs
+
+for (yr in 2008:2019) {
+    freq_tanuki_yr <- paste0("freq_tanuki_",yr)
+    freq_tanuki_yr_get <- get(freq_tanuki_yr)
+    freq_notanuki_yr <- paste0("freq_notanuki_",yr)
+    freq_notanuki_yr_get <- get(freq_notanuki_yr)
+    data<- c(freq_tanuki_yr_get$density,freq_notanuki_yr_get$density)
+    rown <- c("With\n sightings","Without\n sightings")
+    matrix <- matrix(data, nrow = 2, byrow = TRUE, dimnames = list(rown,landusecats))
+    filename <- paste0("LandUseFrequenciesComparisons_",yr,".png")
+    png(filename, width = 800, height = 270)
+    barplot(t(matrix), main=yr, xaxt="n", ylab="Area", xlab="Frequency (%)", col=landusepalette, horiz = TRUE)
+    axis(1, at = c(0,10,20,30,40,50,60,70,80,90,100))
+    dev.off()
+    rm(freq_tanuki_yr,freq_tanuki_yr_get,freq_notanuki_yr,freq_notanuki_yr_get,data,rown,matrix,filename,yr)
+}
+
+# PLOT Appendix x: paired test graphs
+
+frequencies_df <- data.frame()
+for (yr in 2008:2019) {
+    freq_tanuki_yr <- paste0("freq_tanuki_",yr)
+    freq_tanuki_yr_get <- get(freq_tanuki_yr)
+    with_df <- data.frame(Area = c("With sightings"), "Land use type" = c(landusecats), "Frequency (%)" = freq_tanuki_yr_get$density, Year = c(yr), check.names = FALSE)
+    frequencies_df <- rbind(frequencies_df,with_df)
+    freq_notanuki_yr <- paste0("freq_notanuki_",yr)
+    freq_notanuki_yr_get <- get(freq_notanuki_yr)
+    without_df <- data.frame(Area = c("Without sightings"), "Land use type" = c(landusecats), "Frequency (%)" = freq_notanuki_yr_get$density, Year = c(yr), check.names = FALSE)
+    frequencies_df <- rbind(frequencies_df,without_df)
+    rm(freq_tanuki_yr,freq_tanuki_yr_get,with_df,freq_notanuki_yr,freq_notanuki_yr_get,without_df,yr)
+}
+for (i in landusecats) {
+    df <- subset(frequencies_df, frequencies_df[,2]== i, select = c("Area","Frequency (%)","Year"), drop = TRUE)
+    filename <- paste0("FrequenciesComparisons_",i,".png")
+    ggpaired(df,x="Area",y="Frequency (%)",id="Year",xlab="Area",ylab="Frequency (%)",color="Area",palette=c("#005f9e","#ab4d00"),line.color = "darkgray",main=i) %>% ggexport(filename = filename)
+    rm(df,filename,i)
+}
+
+# TEST table 1: Statistical tests for significance in difference between areas with and without sightings of Japanese raccoon dogs, in terms of the frequency of each land use type
+
+shapiro_p_all <- c()
+for (i in 1:13) {
+    q1_data <- paste0("q1_data_",i)
+    assign(q1_data, data.frame(tanuki = c(freq_tanuki_2008$density[i],freq_tanuki_2009$density[i],freq_tanuki_2010$density[i],freq_tanuki_2011$density[i],freq_tanuki_2012$density[i],freq_tanuki_2013$density[i],freq_tanuki_2014$density[i],freq_tanuki_2015$density[i],freq_tanuki_2016$density[i],freq_tanuki_2017$density[i],freq_tanuki_2018$density[i],freq_tanuki_2019$density[i]), no_tanuki = c(freq_notanuki_2008$density[i],freq_notanuki_2009$density[i],freq_notanuki_2010$density[i],freq_notanuki_2011$density[i],freq_notanuki_2012$density[i],freq_notanuki_2013$density[i],freq_notanuki_2014$density[i],freq_notanuki_2015$density[i],freq_notanuki_2016$density[i],freq_notanuki_2017$density[i],freq_notanuki_2018$density[i],freq_notanuki_2019$density[i])))
+    q1_data_get <- get(q1_data)
+    shapiro_p <- shapiro.test(with(q1_data_get, tanuki - no_tanuki))$p
+    shapiro_p_all <- c(shapiro_p_all, shapiro_p)
+    rm(q1_data,q1_data_get,shapiro_p,i)
+}
+ttest_or_wilcox <- ifelse(shapiro_p_all > 0.05, "Paired t-test", "Wilcoxon signed-rank test")
+q1_p_vals <- c()
+q1_t_stats <- c()
+q1_w_stats <- c()
+q1_decisions <- c()
+for (i in 1:13) {
+    q1_data <- paste0("q1_data_",i)
+    q1_data_get <- get(q1_data)
+    q1_p_val <- ifelse(ttest_or_wilcox[i] == "Paired t-test",t.test(q1_data_get$tanuki,q1_data_get$no_tanuki,paired = TRUE)$p.value,wilcox.test(q1_data_get$tanuki,q1_data_get$no_tanuki,paired = TRUE)$p.value)
+    q1_t_stat <- ifelse(ttest_or_wilcox[i] == "Paired t-test",round(t.test(q1_data_get$tanuki,q1_data_get$no_tanuki,paired = TRUE)$statistic,1),"-")
+    q1_w_stat <- ifelse(ttest_or_wilcox[i] == "Wilcoxon signed-rank test",wilcox.test(q1_data_get$tanuki,q1_data_get$no_tanuki,paired = TRUE)$statistic,"-")
+    q1_decision <- ifelse(q1_p_val > 0.05, "-", ifelse(q1_t_stat > 0, "With sightings", ifelse(q1_t_stat < 0, "Without sightings", ifelse(q1_w_stat < sum(1:13)/2, "Without sightings","-"))))
+    q1_p_vals <- c(q1_p_vals,q1_p_val)
+    q1_t_stats <- c(q1_t_stats,q1_t_stat)
+    q1_w_stats <- c(q1_w_stats,q1_w_stat)
+    q1_decisions <- c(q1_decisions,q1_decision)
+    rm(q1_data,q1_data_get,q1_p_val,q1_t_stat,q1_w_stat,q1_decision,i)
+}
+
+## Table 1: paired tests results
+q1_analysis_table <- data.frame("Land use type"=landusecats,"Statistical test p-value"=ifelse(q1_p_vals < 0.001, "<.001", signif(q1_p_vals,2)),"t statistic"=q1_t_stats,"W statistic"=q1_w_stats,"Areas where land use type is significantly more frequent"=q1_decisions,check.names = FALSE)
+write.csv(q1_analysis_table,"q1_analysis_table.csv",row.names=FALSE)
+## Appendix C: paired tests
+q1_analysis_appendix <- data.frame("Land use type"=landusecats,"Shapiro-Wilk test p-value"=ifelse(shapiro_p_all < 0.001, "<.001", signif(shapiro_p_all,2)),"Statistical test"=ttest_or_wilcox,check.names = FALSE)
+write.csv(q1_analysis_appendix,"q1_analysis_appendix.csv",row.names=FALSE)
+rm(shapiro_p_all,ttest_or_wilcox,q1_p_vals,q1_t_stats,q1_w_stats,q1_decisions)
+
+# Get frequencies of each primarily vegetated land use type in each year's land use mosaic map of areas where sightings did/did not occur between humans and Japanese raccoon dogs
+
+freq_veg <- data.frame()
+for (yr in 2008:2019) {
+    freq_veg_tanuki_yr <- paste0("freq_veg_tanuki_",yr)
+    freq_tanuki_yr <- paste0("freq_tanuki_",yr)
+    freq_tanuki_yr_get <- get(freq_tanuki_yr)
+    assign(freq_veg_tanuki_yr,list(counts=c(freq_tanuki_yr_get[[c(2,1)]],freq_tanuki_yr_get[[c(2,2)]],freq_tanuki_yr_get[[c(2,3)]])))
+    freq_veg_tanuki_yr_get <- get(freq_veg_tanuki_yr)
+    freq_veg_tanuki_yr_get$density = freq_veg_tanuki_yr_get$counts/sum(freq_veg_tanuki_yr_get$counts)*100
+    assign(freq_veg_tanuki_yr,freq_veg_tanuki_yr_get)
+    with_df <- data.frame(Area = c("With sightings"), "Land use type" = c(landusecats[1:3]), "Counts" = freq_veg_tanuki_yr_get$counts, "Frequency (%)" = freq_veg_tanuki_yr_get$density, Year = c(yr), check.names = FALSE)
+    freq_veg <- rbind(freq_veg,with_df)
+    freq_veg_notanuki_yr <- paste0("freq_veg_notanuki_",yr)
+    freq_notanuki_yr <- paste0("freq_notanuki_",yr)
+    freq_notanuki_yr_get <- get(freq_notanuki_yr)
+    assign(freq_veg_notanuki_yr,list(counts=c(freq_notanuki_yr_get[[c(2,1)]],freq_notanuki_yr_get[[c(2,2)]],freq_notanuki_yr_get[[c(2,3)]])))
+    freq_veg_notanuki_yr_get <- get(freq_veg_notanuki_yr)
+    freq_veg_notanuki_yr_get$density = freq_veg_notanuki_yr_get$counts/sum(freq_veg_notanuki_yr_get$counts)*100
+    assign(freq_veg_notanuki_yr,freq_veg_notanuki_yr_get)
+    without_df <- data.frame(Area = c("Without sightings"), "Land use type" = c(landusecats[1:3]), "Counts" = freq_veg_notanuki_yr_get$counts, "Frequency (%)" = freq_veg_notanuki_yr_get$density, Year = c(yr), check.names = FALSE)
+    freq_veg <- rbind(freq_veg,without_df)
+    rm(freq_veg_tanuki_yr,freq_veg_tanuki_yr_get,freq_tanuki_yr,freq_tanuki_yr_get,with_df,freq_veg_notanuki_yr,freq_veg_notanuki_yr_get,freq_notanuki_yr,freq_notanuki_yr_get,without_df,yr)
+}
+png("LandUseFrequenciesVeg.png", width = 500, height = 400)
+ggsummarystats(freq_veg, x = "Land use type", y = "Frequency (%)", ggfunc = ggboxplot, add = "jitter", summaries = c("mean", "median", "iqr"), color = "Area", palette = c("#005f9e","#ab4d00"))    
+dev.off()
+
+freq_veg_stats <- freq_veg %>%
+  group_by(freq_veg[,1],freq_veg[,2]) %>%
+  get_summary_stats("Frequency (%)", type = "mean")
+chisq.test(data.frame(with=freq_veg_stats$mean[1:3],without=freq_veg_stats$mean[4:6]))
+
+# Get total number of sightings per year
+
+totals_yrly <- c()
+for (yr in 2008:2019) {
+    tanuki_yr <- paste0("tanuki_",yr)
+    tanuki_yr_get <- get(tanuki_yr)
+    yr_total <- nrow(tanuki_yr_get@data)
+    totals_yrly <- c(totals_yrly,yr_total)
+}
+rm(yr,yr_total,tanuki_yr,tanuki_yr_get)
+
+# Get NNI for each year
+
+nni_yrly <- c()
+for (yr in 2008:2019) {
+    nni_yr <- paste0("nni_",yr)
+    pts_yr <- paste0("pts_",yr)
+    pts_yr_get <- get(pts_yr)
+    assign(nni_yr,nni(pts_yr_get)$NNI)
+    nni_yr_get <- get(nni_yr)
+    nni_yrly <- c(nni_yrly,nni_yr_get)
+    rm(nni_yr,pts_yr,pts_yr_get,nni_yr_get,yr,list=(ls(pattern="^nni_20")))
+}
+
+# PLOT Figure x: NNI against totals
+
+png("NNI_Sightings.png", width = 800, height = 300)
+par(mar = c(5,5,2,15), xpd=TRUE)
+plot(c(2008:2019),nni_yrly, type="b", pch = 20, lty=2, col = "#555555", ylim=c(0,1), xaxt="n", ylab="Nearest neighbour index",xlab="Year")
+axis(1, seq(2008,2019,1))
+par(new = T)
+plot(c(2008:2019),totals_yrly, type="b", pch = 20, lty=1, col = "#005f9e", ylim=c(80,180), axes=F, xlab=NA, ylab=NA)
+axis(side = 4)
+mtext(side = 4, line = 3,col = "#005f9e", 'Number of sightings')
+legend("topleft", inset = c(1.15,0), title="Legend", legend=c("NNI", "Sightings"), lty=c(2,1), pch=c(20, 20), col=c("#555555","#005f9e"), bty = "n")
+dev.off()
+
+# TEST Spearman's Correlation
+
+cor.test(totals_yrly,nni_yrly,method = "spearman",exact = FALSE)
+
+# PLOT Figure x: NNI against land use frequencies
+## NNI against primarily vegetated land use types
+png("NNI_LandUseFrequencies_Veg.png", width = 800, height = 300)
+par(mar = c(5,5,2,15), xpd=TRUE)
+plot(c(2008:2019),nni_yrly, type="b", pch = 20, lty=2, col = "#555555",ylim=c(0,1), xaxt="n", ylab="Nearest neighbour index",xlab="Year")
+axis(1, seq(2008,2019,1))
+for (i in 1:3) {
+    par(new = T)
+    freqs_yrly <- paste0("freqs_yrly_",landusecats[i])
+    assign(freqs_yrly, c(freq_tanuki_2008$density[i],freq_tanuki_2009$density[i],freq_tanuki_2010$density[i],freq_tanuki_2011$density[i],freq_tanuki_2012$density[i],freq_tanuki_2013$density[i],freq_tanuki_2014$density[i],freq_tanuki_2015$density[i],freq_tanuki_2016$density[i],freq_tanuki_2017$density[i],freq_tanuki_2018$density[i],freq_tanuki_2019$density[i]))
+    freqs_yrly_get <- get(freqs_yrly)
+    plot(c(2008:2019),freqs_yrly_get, ylim=c(0,6),type="b", pch = 20, lty=1, col = landusepalette[i],axes=F, xlab=NA, ylab=NA)
+}
+axis(side = 4)
+mtext(side = 4, line = 3, "Mean frequency of land use type (%)")
+legend("topleft", inset = c(1.15,0), title="Legend", legend=c("NNI", landusecats[1:3]), lty=c(2,1,1,1), pch=c(20, 20), col=c("#555555", landusepalette[1:3]), cex=0.8, box.lty=0)
+dev.off()
+## NNI against residential land use types
+png("NNI_LandUseFrequencies_Res.png", width = 800, height = 300)
+par(mar = c(5,5,2,15), xpd=TRUE)
+plot(c(2008:2019),nni_yrly, type="b", pch = 20, lty=2, col = "#555555",ylim=c(0,1), xaxt="n", ylab="Nearest neighbour index",xlab="Year")
+axis(1, seq(2008,2019,1))
+for (i in 4:6) {
+    par(new = T)
+    freqs_yrly <- paste0("freqs_yrly_",landusecats[i])
+    assign(freqs_yrly, c(freq_tanuki_2008$density[i],freq_tanuki_2009$density[i],freq_tanuki_2010$density[i],freq_tanuki_2011$density[i],freq_tanuki_2012$density[i],freq_tanuki_2013$density[i],freq_tanuki_2014$density[i],freq_tanuki_2015$density[i],freq_tanuki_2016$density[i],freq_tanuki_2017$density[i],freq_tanuki_2018$density[i],freq_tanuki_2019$density[i]))
+    freqs_yrly_get <- get(freqs_yrly)
+    plot(c(2008:2019),freqs_yrly_get, ylim=c(10,45),type="b", pch = 20, lty=1, col = landusepalette[i],axes=F, xlab=NA, ylab=NA)
+}
+axis(side = 4)
+mtext(side = 4, line = 3, "Mean frequency of land use type (%)")
+legend("topleft", inset = c(1.15,0), title="Legend", legend=c("NNI", landusecats[4:6]), lty=c(2,1,1,1), pch=c(20, 20), col=c("#555555", landusepalette[4:6]), cex=0.8, box.lty=0)
+dev.off()
+## NNI against all other land use types
+png("NNI_LandUseFrequencies_Others.png", width = 800, height = 300)
+par(mar = c(5,5,2,15), xpd=TRUE)
+plot(c(2008:2019),nni_yrly, type="b", pch = 20, lty=2, col = "#555555",ylim=c(0,1), xaxt="n", ylab="Nearest neighbour index",xlab="Year")
+axis(1, seq(2008,2019,1))
+for (i in 7:13) {
+    par(new = T)
+    freqs_yrly <- paste0("freqs_yrly_",landusecats[i])
+    assign(freqs_yrly, c(freq_tanuki_2008$density[i],freq_tanuki_2009$density[i],freq_tanuki_2010$density[i],freq_tanuki_2011$density[i],freq_tanuki_2012$density[i],freq_tanuki_2013$density[i],freq_tanuki_2014$density[i],freq_tanuki_2015$density[i],freq_tanuki_2016$density[i],freq_tanuki_2017$density[i],freq_tanuki_2018$density[i],freq_tanuki_2019$density[i]))
+    freqs_yrly_get <- get(freqs_yrly)
+    plot(c(2008:2019),freqs_yrly_get, ylim=c(0,8),type="b", pch = 20, lty=1, col = landusepalette[i],axes=F, xlab=NA, ylab=NA)
+    rm(freqs_yrly,freqs_yrly_get,i)
+}
+axis(side = 4)
+mtext(side = 4, line = 3, "Mean frequency of land use type (%)")
+legend("topleft", inset = c(1.15,0), title="Legend", legend=c("NNI", landusecats[7:13]), lty=c(2,1,1,1,1,1,1,1), pch=c(20, 20), col=c("#555555", landusepalette[7:13]), cex=0.8, box.lty=0)
+dev.off()
+
+# TEST Spearman's Correlations
+spearman_stats <- c()
+spearman_cos <- c()
+spearman_ps <- c()
+q3_decisions <- c()
+for (i in 1:13) {
+    freqs_yrly <- paste0("freqs_yrly_",landusecats[i])
+    freqs_yrly_get <- get(freqs_yrly)
+    spearman_stat <- cor.test(freqs_yrly_get,nni_yrly,method = "spearman",exact = FALSE)$statistic
+    spearman_co <- cor.test(freqs_yrly_get,nni_yrly,method = "spearman",exact = FALSE)$estimate
+    spearman_p <- cor.test(freqs_yrly_get,nni_yrly,method = "spearman",exact = FALSE)$p.value
+    q3_decision <- ifelse(spearman_p > 0.05, "Insignificant", ifelse(spearman_co > 0, "Positive", "Negative"))
+    spearman_stats <- c(spearman_stats, spearman_stat)
+    spearman_cos <- c(spearman_cos, spearman_co)
+    spearman_ps <- c(spearman_ps, spearman_p)
+    q3_decisions <- c(q3_decisions, q3_decision)
+    rm(freqs_yrly, freqs_yrly_get,spearman_stat,spearman_co,spearman_p,q3_decision,i)
+}
+q3_analysis_table <- data.frame(type = landusecats, statistic = round(spearman_stats,1), p = ifelse(spearman_ps < 0.001, "<.001", signif(spearman_ps,2)), coefficient = signif(spearman_cos,2), decision = q3_decisions)
+write.csv(q3_analysis_table,"q3_analysis_table.csv",row.names=FALSE)
+rm(spearman_stats, spearman_cos, spearman_ps, q3_decisions)
